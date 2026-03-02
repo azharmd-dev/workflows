@@ -14,7 +14,10 @@ on:
         type: string
       environment:
         required: true
-        type: string   
+        type: string
+      source_repo:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -28,28 +31,27 @@ jobs:
     runs-on: self-hosted
 
     steps:
-
     # ---------------------------------------------------
-    # Safety Guard → ensure this workflow is used only for PROD
+    # Safety guard
     # ---------------------------------------------------
     - name: Ensure PROD environment
       run: |
-        if [ "${{ inputs.environment }}" != "dev" ]; then
-          echo "❌ This workflow is only for PROD deployments"
+        if [ "${{ inputs.environment }}" != "prod" ]; then
+          echo "This workflow is only for PROD deployments"
           exit 1
         fi
-        echo "✅ PROD deployment confirmed"
+        echo "PROD deployment confirmed"
 
     # ---------------------------------------------------
-    # Validate Promotion Chain (REAL approval gate)
+    # Validate promotion chain (REAL approval gate)
     # ---------------------------------------------------
     - name: Validate Promotion Chain
       run: |
         COMMIT=${{ inputs.commit_id }}
-        REPO=${{ github.repository }}
+        REPO=${{ inputs.source_repo }}
         TOKEN=${{ secrets.GITHUB_TOKEN }}
 
-        echo "Checking commit statuses for $COMMIT"
+        echo "Checking commit statuses in $REPO for commit $COMMIT"
 
         curl -s -H "Authorization: Bearer $TOKEN" \
         https://api.github.com/repos/$REPO/commits/$COMMIT/status \
@@ -69,15 +71,15 @@ jobs:
           echo "$CONTEXT -> $STATE"
 
           if [ "$STATE" != "success" ]; then
-            echo "$CONTEXT failed or missing. Cannot deploy to PROD."
+            echo "❌ $CONTEXT failed or missing. Cannot deploy to PROD."
             exit 1
           fi
         done
 
-        echo "All environments passed. PROD deployment allowed."
+        echo "✅ All environments passed. PROD deployment allowed."
 
     # ---------------------------------------------------
-    # Configure AWS Credentials (PROD)
+    # AWS credentials (PROD)
     # ---------------------------------------------------
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v5
@@ -87,7 +89,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
 
     # ---------------------------------------------------
-    # Login to PROD EKS Cluster
+    # Login to EKS PROD
     # ---------------------------------------------------
     - name: Authenticate to EKS PROD
       run: |
@@ -95,7 +97,7 @@ jobs:
         kubectl get nodes
 
     # ---------------------------------------------------
-    # Checkout Deployment Repository
+    # Checkout deploy repo
     # ---------------------------------------------------
     - name: Checkout Deploy Repo
       uses: actions/checkout@v4
@@ -103,27 +105,38 @@ jobs:
         repository: azharmd-dev/catalogue-deploy
 
     # ---------------------------------------------------
-    # Deploy to Production via Helm
+    # Deploy to PROD
     # ---------------------------------------------------
     - name: Deploy to PROD
       id: deploy_check
       run: |
-        echo "Deploying commit ${{ inputs.commit_id }} to PROD"
-
         helm upgrade --install ${{ inputs.component }} \
-          -f values-prod.yaml \
+          -f values-dev.yaml \
           --set deployment.imageVersion=${{ inputs.commit_id }} \
           -n ${{ inputs.project }} \
           --atomic --wait --timeout=10m .
 
     # ---------------------------------------------------
-    # Set PROD Commit Status
+    # Convert outcome → valid GitHub state
+    # ---------------------------------------------------
+    - name: Convert outcome to GitHub status
+      id: status_map
+      if: always()
+      run: |
+        if [ "${{ steps.deploy_check.outcome }}" == "success" ]; then
+          echo "state=success" >> $GITHUB_OUTPUT
+        else
+          echo "state=failure" >> $GITHUB_OUTPUT
+        fi
+
+    # ---------------------------------------------------
+    # Set commit status → PROD_DEPLOY
     # ---------------------------------------------------
     - name: Set PROD commit status
       if: always()
       uses: azhardevmd/workflows/.github/actions/set-commit-status@main
       with:
-        state: ${{ steps.deploy_check.outcome }}
+        state: ${{ steps.status_map.outputs.state }}
         context: "PROD_DEPLOY"
         status_description: "Production ${{ steps.deploy_check.outcome }}"
-        target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        target_url: ${{ github.server_url }}/${{ inputs.source_repo }}/actions/runs/${{ github.run_id }}

@@ -14,17 +14,116 @@ on:
         type: string
       environment:
         required: true
-        type: string
+        type: string   
 
 permissions:
   contents: read
   statuses: write
+
+env:
+  ACCOUNT_ID: 522534289017
 
 jobs:
   prod-pipeline:
     runs-on: self-hosted
 
     steps:
-      - name: Echo test
-        run: |
-          echo "Reusable workflow connected"
+
+    # ---------------------------------------------------
+    # Safety Guard → ensure this workflow is used only for PROD
+    # ---------------------------------------------------
+    - name: Ensure PROD environment
+      run: |
+        if [ "${{ inputs.environment }}" != "dev" ]; then
+          echo "❌ This workflow is only for PROD deployments"
+          exit 1
+        fi
+        echo "✅ PROD deployment confirmed"
+
+    # ---------------------------------------------------
+    # Validate Promotion Chain (REAL approval gate)
+    # ---------------------------------------------------
+    - name: Validate Promotion Chain
+      run: |
+        COMMIT=${{ inputs.commit_id }}
+        REPO=${{ github.repository }}
+        TOKEN=${{ secrets.GITHUB_TOKEN }}
+
+        echo "Checking commit statuses for $COMMIT"
+
+        curl -s -H "Authorization: Bearer $TOKEN" \
+        https://api.github.com/repos/$REPO/commits/$COMMIT/status \
+        > status.json
+
+        REQUIRED=(
+          "UNIT_TEST"
+          "NPM_AUDIT"
+          "DOCKER_BUILD"
+          "DEV_DEPLOY"
+          "UAT_DEPLOY"
+        )
+
+        for CONTEXT in "${REQUIRED[@]}"; do
+          STATE=$(jq -r ".statuses[] | select(.context==\"$CONTEXT\") | .state")
+
+          echo "$CONTEXT -> $STATE"
+
+          if [ "$STATE" != "success" ]; then
+            echo "$CONTEXT failed or missing. Cannot deploy to PROD."
+            exit 1
+          fi
+        done
+
+        echo "All environments passed. PROD deployment allowed."
+
+    # ---------------------------------------------------
+    # Configure AWS Credentials (PROD)
+    # ---------------------------------------------------
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v5
+      with:
+        aws-region: ${{ secrets.PROD_AWS_REGION }}
+        aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+
+    # ---------------------------------------------------
+    # Login to PROD EKS Cluster
+    # ---------------------------------------------------
+    - name: Authenticate to EKS PROD
+      run: |
+        aws eks update-kubeconfig --region us-east-1 --name robomart-dev
+        kubectl get nodes
+
+    # ---------------------------------------------------
+    # Checkout Deployment Repository
+    # ---------------------------------------------------
+    - name: Checkout Deploy Repo
+      uses: actions/checkout@v4
+      with:
+        repository: azharmd-dev/catalogue-deploy
+
+    # ---------------------------------------------------
+    # Deploy to Production via Helm
+    # ---------------------------------------------------
+    - name: Deploy to PROD
+      id: deploy_check
+      run: |
+        echo "Deploying commit ${{ inputs.commit_id }} to PROD"
+
+        helm upgrade --install ${{ inputs.component }} \
+          -f values-prod.yaml \
+          --set deployment.imageVersion=${{ inputs.commit_id }} \
+          -n ${{ inputs.project }} \
+          --atomic --wait --timeout=10m .
+
+    # ---------------------------------------------------
+    # Set PROD Commit Status
+    # ---------------------------------------------------
+    - name: Set PROD commit status
+      if: always()
+      uses: azhardevmd/workflows/.github/actions/set-commit-status@main
+      with:
+        state: ${{ steps.deploy_check.outcome }}
+        context: "PROD_DEPLOY"
+        status_description: "Production ${{ steps.deploy_check.outcome }}"
+        target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

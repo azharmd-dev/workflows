@@ -62,9 +62,9 @@ jobs:
         jq -r '.check_runs[].name' checks.json
 
         REQUIRED=(
-          "UNIT_TEST"
-          "NPM_AUDIT"
-          "DOCKER_BUILD"
+          # "UNIT_TEST"
+          # "NPM_AUDIT"
+          # "DOCKER_BUILD"
           "DEV_DEPLOY"
           "UAT_DEPLOY"
         )

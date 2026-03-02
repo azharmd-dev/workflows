@@ -34,15 +34,26 @@ jobs:
         COMMIT=${{ inputs.commit_id }}
         REPO=${{ github.repository }}
         TOKEN=${{ secrets.GITHUB_TOKEN }}
+        ENV=${{ inputs.environment }}
 
         curl -s -H "Authorization: Bearer $TOKEN" \
         https://api.github.com/repos/$REPO/commits/$COMMIT/status \
         > status.json
 
-        REQUIRED=("UNIT_TEST" "NPM_AUDIT" "DOCKER_BUILD" "DEV_DEPLOY")
+        if [ "$ENV" == "dev" ]; then
+          REQUIRED=("UNIT_TEST" "NPM_AUDIT" "DOCKER_BUILD")
+        elif [ "$ENV" == "uat" ]; then
+          REQUIRED=("UNIT_TEST" "NPM_AUDIT" "DOCKER_BUILD" "DEV_DEPLOY")
+        else
+          echo "Invalid environment"
+          exit 1
+        fi
+
+        echo "Required checks for $ENV:"
+        printf '%s\n' "${REQUIRED[@]}"
 
         for CONTEXT in "${REQUIRED[@]}"; do
-          STATE=$(jq -r ".statuses[] | select(.context==\"$CONTEXT\") | .state" status.json)
+          STATE=$(jq -r ".statuses | map(select(.context==\"$CONTEXT\")) | .[0].state" status.json)
 
           echo "$CONTEXT -> $STATE"
 
@@ -52,7 +63,7 @@ jobs:
           fi
         done
 
-        echo "✅ All checks passed. Promotion allowed."
+        echo "✅ Promotion allowed for $ENV"
 
     # ---------------- SELECT CLUSTER DYNAMICALLY ----------------
     # - name: Set cluster name
@@ -105,11 +116,32 @@ jobs:
         #   --atomic --wait --timeout=5m .
 
 
-    - name: DEPLOY status
+    # - name: DEPLOY status
+    #   if: always()
+    #   uses: azhardevmd/workflows/.github/actions/set-commit-status@main
+    #   with:
+    #     state: ${{ steps.deploy_check.outcome }}
+    #     context: "${{ inputs.environment }}-DEPLOY"
+    #     status_description: "${{ inputs.environment }} ${{ steps.deploy_check.outcome }}"
+    #     target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    
+    # Convert outcome → valid GitHub state
+    - name: Convert outcome to GitHub status
+      id: status_map
+      if: always()
+      run: |
+        if [ "${{ steps.deploy_check.outcome }}" == "success" ]; then
+          echo "state=success" >> $GITHUB_OUTPUT
+        else
+          echo "state=failure" >> $GITHUB_OUTPUT
+        fi
+
+    # Map environment → fixed context name
+    - name: Set DEPLOY commit status
       if: always()
       uses: azhardevmd/workflows/.github/actions/set-commit-status@main
       with:
-        state: ${{ steps.deploy_check.outcome }}
-        context: "${{ inputs.environment }}-DEPLOY"
-        status_description: "${{ inputs.environment }} ${{ steps.deploy_check.outcome }}"
+        state: ${{ steps.status_map.outputs.state }}
+        context: ${{ inputs.environment == 'uat' && 'UAT_DEPLOY' || 'DEV_DEPLOY' }}
+        status_description: "${{ inputs.environment }} deploy ${{ steps.deploy_check.outcome }}"
         target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

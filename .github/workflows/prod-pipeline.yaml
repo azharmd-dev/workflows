@@ -51,39 +51,36 @@ jobs:
         REPO=${{ inputs.source_repo }}
         TOKEN=${{ secrets.GITHUB_TOKEN }}
 
-        echo "Fetching check runs..."
+        echo "Fetching commit statuses from $REPO for $COMMIT"
 
         curl -s -H "Authorization: Bearer $TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/$REPO/commits/$COMMIT/check-runs \
-            > checks.json
+          https://api.github.com/repos/$REPO/commits/$COMMIT/status \
+          > status.json
 
-        echo "Available checks:"
-        jq -r '.check_runs[].name' checks.json
+        echo "Available contexts:"
+        jq -r '.statuses[].context' status.json
 
         REQUIRED=(
-          # "UNIT_TEST"
-          # "NPM_AUDIT"
-          # "DOCKER_BUILD"
+          "UNIT_TEST"
+          "NPM_AUDIT"
+          "DOCKER_BUILD"
           "DEV_DEPLOY"
           "UAT_DEPLOY"
         )
 
-        for KEYWORD in "${REQUIRED[@]}"; do
+        for CONTEXT in "${REQUIRED[@]}"; do
           STATE=$(jq -r \
-            ".check_runs[] 
-            | select(.name | contains(\"$KEYWORD\")) 
-            | .conclusion" checks.json | head -n 1)
+            ".statuses | map(select(.context==\"$CONTEXT\")) | .[0].state" status.json)
 
-          echo "$KEYWORD -> $STATE"
+          echo "$CONTEXT -> $STATE"
 
           if [ "$STATE" != "success" ]; then
-            echo "❌ $KEYWORD failed or missing. Cannot deploy to PROD."
+            echo "❌ $CONTEXT failed or missing. Cannot deploy to PROD."
             exit 1
           fi
         done
 
-        echo "✅ All promotion checks passed. PROD deployment allowed."
+        echo "✅ Promotion chain validated. Deploying to PROD."
 
     # ---------------------------------------------------
     # AWS credentials (PROD)
